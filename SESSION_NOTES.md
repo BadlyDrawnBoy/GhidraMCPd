@@ -2,9 +2,10 @@
 
 ## Current State
 
-**Version**: 1.3.0 (built, not yet installed)
+**Version**: 1.3.0 (installed and fully tested)
 **Location**: `target/GhidraMCP-1.3.0.zip`
-**Last Commit**: 6f50269 - "Implement dirty-state handling and program save functionality (v1.3.0)"
+**Last Commit**: bbbf7d0 - "Add on_dirty parameter to select_program MCP tool"
+**Bridge Status**: Running with updated on_dirty parameter support
 
 ## What We Accomplished This Session
 
@@ -40,6 +41,41 @@ Implemented comprehensive dirty-state checking to prevent data loss when switchi
 - `Program.save(String, TaskMonitor)` - Persist changes
 - Docs: https://ghidra.re/ghidra_docs/api/ghidra/program/model/listing/Program.html
 
+### ✅ Path 2: Write Tools - Exposed as MCP Tools (COMPLETE)
+
+Exposed existing Java write functionality as MCP tools for AI agent access.
+
+**Background:**
+- Write functionality (rename/comment) already existed in Laurie's original GhidraMCP plugin
+- Java endpoints and Python client wrappers were implemented
+- Missing piece: MCP tool exposure for AI agent access
+
+**New MCP Tools Added:**
+1. **`rename_function(address, new_name, dry_run=True)`**
+   - Wraps existing `client.rename_function()` and Java `renameFunctionByAddress()`
+   - Renames functions at specified addresses
+   - Default dry_run mode for safety
+
+2. **`set_comment(address, comment, comment_type="decompiler", dry_run=True)`**
+   - Wraps `client.set_decompiler_comment()` and `client.set_disassembly_comment()`
+   - Supports both decompiler and disassembly comments
+   - Default dry_run mode for safety
+
+**Implementation:**
+- Python: 2 new MCP tools in `bridge/api/tools.py` (~180 lines)
+- Write guards: Require `GHIDRA_MCP_ENABLE_WRITES=true` when `dry_run=false`
+- Request scope tracking with `max_writes=1` per operation
+- Proper envelope responses with success/error states
+
+**Testing:**
+- ✅ Dry-run mode: Both tools validated without executing
+- ✅ Write guards: Correctly block writes when disabled
+- ✅ Actual writes: Successfully renamed `FUN_00000080` → `init_system`
+- ✅ Actual comments: Successfully added decompiler comment
+- ✅ Verification: Changes confirmed via `search_functions`
+
+**Time:** ~30 minutes (much faster than estimated 1-2h because underlying implementation already existed)
+
 ### ✅ Documentation Updates (Previous Session)
 
 Added comprehensive navigation documentation (commit 5c40dd1):
@@ -47,60 +83,87 @@ Added comprehensive navigation documentation (commit 5c40dd1):
 - docs/README.md - Added curl example for goto endpoint
 - docs/getting-started.md - Added "Basic usage workflows" section with navigation patterns
 
-## What Needs Testing (NEXT STEPS)
+## Testing Results (2025-11-26)
 
-### 1. Install v1.3.0 in Ghidra
-```bash
-# In Ghidra:
-# File → Install Extensions → select target/GhidraMCP-1.3.0.zip
-# Restart Ghidra
-# File → Configure → check "GhidraMCP" to activate
-```
+### ✅ Successfully Tested
 
-### 2. Test Dirty-State Handling
+**Test 1: Clean Program State Detection**
+- ✅ `check_dirty_state()` correctly reports `changed: false` on clean program
+- ✅ `can_save: true` shows we have save permission
+- Result: PASSED
 
-**Test Case 1: Check Clean Program**
-```python
-# With a clean program loaded
-result = check_dirty_state()
-# Expected: {"changed": false, "can_save": true, "program_name": "..."}
-```
+**Test 2: Save Clean Program**
+- ✅ `save_program()` on clean program correctly reports "no changes to save"
+- ✅ Returns `saved: false` as expected
+- Result: PASSED
 
-**Test Case 2: Make Changes and Check**
-```python
-# Make some edits in Ghidra (rename function, add comment, etc.)
-result = check_dirty_state()
-# Expected: {"changed": true, "can_save": true, ...}
-```
+**Test 3: Program Switching (Clean)**
+- ✅ Switching programs when clean works without errors
+- ✅ Appropriate mid-session warning displayed
+- Result: PASSED
 
-**Test Case 3: Save Program**
-```python
-result = save_program(description="Test save from MCP")
-# Expected: {"saved": true, "program_name": "..."}
-```
+**Test 4: Dirty State Detection**
+- ✅ After manual function rename, `check_dirty_state()` reports `changed: true`
+- ✅ Program name correctly identified
+- ✅ Message: "Program has unsaved changes"
+- Result: PASSED - **CRITICAL FEATURE WORKING**
 
-**Test Case 4: Switch Programs with Dirty State**
-```python
-# With unsaved changes:
-# 1. Try switching with default (should fail)
-result = select_program(domain_file_id="other_program")
-# Expected: Error about unsaved changes
+**Test 5: Blocked Program Switch (Dirty State)**
+- ✅ Attempting to switch with unsaved changes **BLOCKS** as designed
+- ✅ Error message clearly states: "Cannot switch programs: current program has unsaved changes"
+- ✅ Helpful recovery suggestion: "use on_dirty=save or on_dirty=discard to proceed"
+- Result: PASSED - **DATA LOSS PREVENTION WORKING**
 
-# 2. Try with save mode
-result = select_program(domain_file_id="other_program", on_dirty="save")
-# Expected: Success with warning about auto-save
+**Test 6: Save Program with Changes**
+- ✅ `save_program(description="...")` successfully saves changes
+- ✅ Returns `saved: true` with program name
+- ✅ Changes persisted to disk
+- Result: PASSED
 
-# 3. Try with discard mode
-result = select_program(domain_file_id="other_program", on_dirty="discard")
-# Expected: Success with warning about discarded changes
-```
+**Test 7: Program Switch After Save**
+- ✅ After saving, `check_dirty_state()` reports `changed: false`
+- ✅ Program switching now works again
+- ✅ Complete workflow validated: dirty → blocked → save → allowed
+- Result: PASSED
 
-### 3. Verify Navigation Still Works
-```python
-# Quick smoke test that v1.3.0 didn't break anything
-goto_address("0x00000080")
-# Expected: CodeBrowser jumps to address
-```
+**Test 8: Auto-Save Mode (`on_dirty="save"`)**
+- ✅ Made changes in current program, then switched with `on_dirty="save"`
+- ✅ Program switch succeeded with warning: "Saved current program before switching"
+- ✅ Current program was auto-saved before the switch
+- Result: PASSED
+
+**Test 9: Discard Mode (`on_dirty="discard"`)**
+- ✅ Made changes in current program, then switched with `on_dirty="discard"`
+- ✅ Program switch succeeded with warning: "Discarding unsaved changes in current program"
+- ✅ Changes were discarded and switch proceeded
+- Result: PASSED
+
+**Test 10: Navigation Smoke Test**
+- ✅ `goto_address("0x00000080")` successfully navigated CodeBrowser
+- ✅ Confirmed v1.3.0 didn't break existing navigation feature
+- Result: PASSED
+
+### 🐛 Issues Encountered & Resolved
+
+**Issue 1: Blank Dialog Window**
+- Symptom: Blank window with no buttons appeared during program switching
+- Resolution: Dialog closed itself after subsequent API call (likely stuck progress dialog)
+- Impact: Minor UI glitch, no functional impact
+- Status: Monitoring for recurrence
+
+**Issue 2: Missing `on_dirty` Parameter in `select_program`**
+- Symptom: `select_program()` didn't expose the `on_dirty` parameter
+- Root Cause: Parameter added to `open_program()` but not passed through `select_program()`
+- Fix: Added `on_dirty` parameter to:
+  - `select_program()` MCP tool signature
+  - `_maybe_autoopen_program()` helper function
+  - Parameter forwarding chain
+- Commit: bbbf7d0
+- Status: Fixed, bridge restarted
+
+## Testing Complete ✅
+
+All 10 test cases have been successfully completed. The dirty-state handling feature (v1.3.0) is fully functional and ready for production use.
 
 ## Roadmap Progress
 
@@ -111,12 +174,12 @@ goto_address("0x00000080")
   - Add automatic retry/wait logic for LOADING state
   - Document state transitions
 
-### Path 2: Complete Navigation Story (NEXT PRIORITY)
-- ⏳ Write tools for annotations:
-  - `rename_function(address, new_name)` - Rename functions
-  - `set_comment(address, comment, type)` - Add comments (EOL, PRE, PLATE, etc.)
+### Path 2: Complete Navigation Story (COMPLETE)
+- ✅ Write tools for annotations:
+  - `rename_function(address, new_name, dry_run=True)` - Rename functions
+  - `set_comment(address, comment, comment_type="decompiler", dry_run=True)` - Add comments
   - All with write guards and dry_run support
-  - Estimated: 1-2 hours
+  - Actual: ~30 minutes (underlying implementation already existed)
 
 ### Path 1: Polish & Documentation (FINAL PRIORITY)
 - ⏳ Write AGENTS.md guide
@@ -134,6 +197,9 @@ goto_address("0x00000080")
 - v1.1.1 - Refined tool launching
 - v1.2.0 - Added goto_address navigation
 - v1.3.0 - **Current** - Added dirty-state handling
+  - Commits:
+    - 6f50269 - Core dirty-state implementation (Java + Python)
+    - bbbf7d0 - Added on_dirty parameter to select_program
 
 ### Important Files
 - Java plugin: `src/main/java/com/lauriewired/GhidraMCPPlugin.java`
@@ -209,6 +275,14 @@ save_program(description="Fixed string references")
 # Switch programs with dirty handling
 select_program(domain_file_id="...", on_dirty="error|save|discard")
 # → Success or error based on dirty state
+
+# Rename a function (requires GHIDRA_MCP_ENABLE_WRITES=true)
+rename_function(address="0x401000", new_name="my_function", dry_run=False)
+# → {"success": bool, "address": str, "new_name": str, "message": str}
+
+# Add a comment (requires GHIDRA_MCP_ENABLE_WRITES=true)
+set_comment(address="0x401000", comment="Analysis note", comment_type="decompiler", dry_run=False)
+# → {"success": bool, "address": str, "comment": str, "comment_type": str, "message": str}
 ```
 
 ## Resources
@@ -219,6 +293,39 @@ select_program(domain_file_id="...", on_dirty="error|save|discard")
 - **Getting Started**: docs/getting-started.md (has usage examples)
 - **Testing Report**: TESTING_REPORT.md
 
+## Summary of Session
+
+### What Works (Tested & Verified) - ALL TESTS PASSING ✅
+
+**Path 3 - Dirty-State Handling:**
+- ✅ Dirty-state detection (`check_dirty_state`)
+- ✅ Program saving (`save_program`)
+- ✅ Blocked program switching when dirty (default behavior)
+- ✅ Clean program workflow (check → save → switch)
+- ✅ `on_dirty="save"` auto-save mode
+- ✅ `on_dirty="discard"` discard mode
+- ✅ Auto-launch still working
+- ✅ Navigation (`goto_address`) still working
+
+**Path 2 - Write Tools:**
+- ✅ `rename_function()` - Dry-run mode validated
+- ✅ `rename_function()` - Actual writes tested (FUN_00000080 → init_system)
+- ✅ `set_comment()` - Dry-run mode validated
+- ✅ `set_comment()` - Actual writes tested (decompiler comment added)
+- ✅ Write guards - Correctly enforce ENABLE_WRITES requirement
+
+### Minor Issues Noted
+- Occasional stuck dialog during program switching (self-resolves)
+- Multiple duplicate warnings in some responses (cosmetic only)
+
+### Commits This Session
+1. **5c40dd1** - Documentation for navigation feature
+2. **6f50269** - Dirty-state handling core implementation (v1.3.0)
+3. **96a453a** - Session notes creation
+4. **bbbf7d0** - Added on_dirty parameter to select_program
+5. **TBD** - Expose rename_function and set_comment as MCP tools
+
 ---
 
-**Next Session Goal**: Test v1.3.0 dirty-state handling, then proceed with Path 2 (write tools)
+**Current Status**: v1.3.0 tested + Path 2 write tools complete. Both dirty-state handling and write tools fully functional.
+**Next Steps**: Path 3 readiness gating (enhance ProgramStatusTracker) or Path 1 documentation (AGENTS.md)
